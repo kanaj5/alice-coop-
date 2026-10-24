@@ -1,0 +1,5 @@
+EXPORTS
+    XInputGetState        @2
+    XInputSetState        @3
+    XInputGetCapabilities @4
+    XInputEnable          @5
