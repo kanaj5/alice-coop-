@@ -25,7 +25,20 @@ static int  g_optSeguirDist = 1500;  // SeguirDistancia (unidades)
 static int  g_optSeguirMs = 3000;  // SeguirEsperaMs entre teletransportes
 static int  g_optCambiosMs = 60000; // CambiosDuracionMs: cuanto tiempo tras entrar el cliente 1 se registran [CAMBIO]
 static int  g_optProt0Ms = 5000;  // ProtegerJugador0Ms: modo dios para el jugador 0 desde ANTES del ClientBegin del cliente 1 (evita que el spawn lo mate)
-static int  g_optProtegerMs = 30000; // ProtegerClienteMs: modo dios (obj+0x180 bit 8) para el cliente 1 tras ClientBegin; 0 = no
+static int  g_optProtegerPrimeraMs = 60000; // ProtegerClientePrimeraMs: duracion del modo dios de B la PRIMERA vez que aparece (cinematica inicial con caida)
+static int  g_optSinFundido = 1;     // QuitarFundidoSiOtroVivo (v0.29): pone a 0 el tinte/fundido de pantalla (alfa) de los jugadores mientras uno esta muerto y otro vivo
+static int  g_optSinFallo = 1;     // EvitarFalloSiOtroVivo (v0.28): 1 = si muere una Alice y la otra sigue viva, NO se ejecuta "mision fallida" (fundido negro + pantalla)
+static int  g_optRevivir = 1;     // ReviveActivo (v0.28): 1 = la Alice viva puede revivir a la muerta manteniendo la tecla de accion cerca del cuerpo
+static int  g_optReviveDist = 110;   // ReviveDistancia (unidades)
+static int  g_optReviveMs = 1500;  // ReviveMantenerMs: tiempo que hay que mantener la tecla
+static int  g_optRevivePct = 50;    // ReviveCompartirPct: % de la vida de quien revive que pasa a la revivida
+static int  g_optReviveMin = 15;    // ReviveVidaMin: vida minima con la que se levanta
+static int  g_optReviveInvulMs = 3000;  // ReviveInvulnerableMs: modo dios corto tras revivir
+static int  g_optReviveDiag = 1;     // ReviveDiagnostico: registra los cambios del byte de botones (+0x5C9) para calibrar la tecla
+static int  g_optSepararSegundoMs = 0; // SepararSegundoMs: segunda colocacion del cliente 1 tras el ClientBegin (para el solape visto solo en B al unirse tarde); 0 = no
+static DWORD g_sep2At = 0;
+static int  g_sepDistOverride = 0;
+static int  g_optProtegerMs = 10000; // ProtegerClienteMs: modo dios (obj+0x180 bit 8) para el cliente 1 tras ClientBegin; 0 = no
 static int  g_optDiagDurMs = 7200000; // DiagDuracionMs: durante cuantos ms tras entrar el cliente 1
 
 static HMODULE g_real = nullptr;
@@ -165,6 +178,7 @@ typedef const char* (__cdecl* PFN_ClientConnect)(int clientNum, int firstTime);
 static PFN_ClientConnect g_origClientConnect = nullptr;
 static char g_persNombre[120] = "";       // ultimo nombre de archivo pasado a ReadPersistant
 static bool g_persTiene = false;
+static bool g_armaDada[2] = { false, false };   // ya se le dio el arma al jugador 0 / 1 en esta sesion
 static bool g_cambioNivel0 = false;       // idem para el cliente 0 (para releer el inventario cuando juega A solo)
 static bool g_hayCliente1 = false;        // true si el cliente 1 se conecto a este nivel
 static bool g_cambioNivel = false;        // true tras un ClientConnect(firstTime=0) del cliente 1 (cambio de mapa)
@@ -182,6 +196,7 @@ static LONG  g_thinkCount[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
 static const char* __cdecl Detour_ClientConnect(int clientNum, int firstTime) {
     Log("[HOOK] ClientConnect(clientNum=%d, firstTime=%d)", clientNum, firstTime);
+    if (firstTime != 0) { g_armaDada[0] = g_armaDada[1] = false; }
     if (clientNum >= 1) { g_cambioNivel = (firstTime == 0); g_hayCliente1 = true; }
     else { g_cambioNivel0 = (firstTime == 0); g_hayCliente1 = false; }
     DumpEdict("antes", clientNum);
@@ -277,7 +292,7 @@ static void DumpOne(const char* tag, int n, DWORD ge) {
     char nombre[40];
     SafeStr(S, nombre, (int)sizeof(nombre));
     DWORD vtRva = (g_fgameBase && vt >= (DWORD)g_fgameBase) ? vt - (DWORD)g_fgameBase : 0;
-    DWORD f140 = 0, f17C = 0, f180 = 0, f34C = 0, f1C0 = 0, f1C4 = 0, ox = 0, oy = 0, oz = 0;
+    DWORD f140 = 0, f17C = 0, f180 = 0, f34C = 0, f1C0 = 0, f1C4 = 0, ox = 0, oy = 0, oz = 0, f170 = 0, f178 = 0;
     if (obj) {   // campos que mira la busqueda de enemigos (FUN_100bd6e0 = FindClosestEnemyInRadius)
         SafeRead((const DWORD*)(obj + 0x140), &f140);
         SafeRead((const DWORD*)(obj + 0x17C), &f17C);
@@ -288,6 +303,8 @@ static void DumpOne(const char* tag, int n, DWORD ge) {
         SafeRead((const DWORD*)(obj + 0x6C), &ox);
         SafeRead((const DWORD*)(obj + 0x70), &oy);
         SafeRead((const DWORD*)(obj + 0x74), &oz);
+        SafeRead((const DWORD*)(obj + 0x170), &f170);
+        SafeRead((const DWORD*)(obj + 0x178), &f178);
     }
     // En el volcado periodico solo se registra si cambia algo relevante (estado, muerto, flags, equipo)
     char clave[200];
@@ -300,8 +317,8 @@ static void DumpOne(const char* tag, int n, DWORD ge) {
     Log("[JUG %d] %s: edict=%08X client=%08X inuse=%u obj=%08X vtable_rva=%08X estado=%08X nombre_estado=\"%s\"",
         n, tag, e, client, (unsigned)inuse, obj, vtRva, A, nombre);
     if (obj) {
-        Log("[IA %d] %s: +140=%08X muerto(+17C)=%08X flags(+180)=%08X equipo(+34C)=%08X +1C0=%08X +1C4=%08X pos(+6C)=%08X %08X %08X",
-            n, tag, f140, f17C, f180, f34C, f1C0, f1C4, ox, oy, oz);
+        Log("[IA %d] %s: +140=%08X muerto(+17C)=%08X flags(+180)=%08X equipo(+34C)=%08X +1C0=%08X +1C4=%08X pos(+6C)=%08X %08X %08X vida(+170)=%.1f max(+178)=%.1f",
+            n, tag, f140, f17C, f180, f34C, f1C0, f1C4, ox, oy, oz, *(float*)&f170, *(float*)&f178);
     }
 }
 
@@ -388,8 +405,8 @@ static void Proteccion0Antes() {
     if (!SafeRead((const DWORD*)(ge + 0x280), &obj0) || !obj0) return;
     if (!SafeRead((const DWORD*)(obj0 + 0x180), &fl)) return;
     g_prot0Obj = obj0;
-    g_prot0Puesta = (fl & 8) == 0;
-    if (g_prot0Puesta) *(DWORD*)(obj0 + 0x180) = fl | 8;
+    g_prot0Puesta = true;   // v0.27: al terminar el tiempo SIEMPRE se apaga el bit (puede venir ya puesto desde una partida guardada)
+    *(DWORD*)(obj0 + 0x180) = fl | 8;
     g_prot0Hasta = GetTickCount() + (DWORD)g_optProt0Ms;
     Log("[PROT0] jugador 0: modo dios activado ANTES del ClientBegin del cliente 1 (obj=%08X flags %08X -> %08X) durante %d ms", obj0, fl, fl | 8, g_optProt0Ms);
 }
@@ -404,16 +421,17 @@ static void Proteccion0Revisar() {
     g_prot0Hasta = 0; g_prot0Obj = 0; g_prot0Puesta = false;
 }
 
-static void ProteccionAplicar(DWORD ent) {
-    if (g_optProtegerMs <= 0) return;
+static void ProteccionAplicar(DWORD ent, bool primeraVez) {
+    int ms = primeraVez ? g_optProtegerPrimeraMs : g_optProtegerMs;
+    if (ms <= 0) return;
     DWORD obj = 0, fl = 0;
     if (!SafeRead((const DWORD*)(ent + 0x280), &obj) || !obj) return;
     if (!SafeRead((const DWORD*)(obj + 0x180), &fl)) return;
     g_protObj = obj;
-    g_protPuesta = (fl & 8) == 0;
-    if (g_protPuesta) *(DWORD*)(obj + 0x180) = fl | 8;
-    g_protHasta = GetTickCount() + (DWORD)g_optProtegerMs;
-    Log("[PROT] cliente 1: modo dios activado en obj=%08X (flags %08X -> %08X) durante %d ms", obj, fl, fl | 8, g_optProtegerMs);
+    g_protPuesta = true;    // v0.27: siempre se apaga al terminar
+    *(DWORD*)(obj + 0x180) = fl | 8;
+    g_protHasta = GetTickCount() + (DWORD)ms;
+    Log("[PROT] cliente 1: modo dios activado en obj=%08X (flags %08X -> %08X) durante %d ms%s", obj, fl, fl | 8, ms, primeraVez ? " (primera aparicion)" : "");
 }
 static void ProteccionRevisar() {
     if (!g_protHasta) return;
@@ -636,6 +654,69 @@ static void CentinelaRevisar() {
     g_tpAt = GetTickCount() + 2500;
 }
 
+
+// ---- v0.26: ARMA COMPARTIDA. Cuando un jugador ataca (= ya tiene arma), el otro recibe tambien el cuchillo vorpal.
+// Se usa la misma secuencia que ClientCommand (FUN_1007d360) para un comando de consola: Event("giveweapon", "w_knife.tik") procesado
+// sobre el objeto Player del jugador objetivo.  Funciones (RVA en fgamex86.dll):
+//   0x1041B0 operator new(size) cdecl | 0x1072D0 Event::Event(name) thiscall | 0x104670 Event::SetConsoleEdict(ent) thiscall
+//   0x019210 Event::AddString(s) thiscall | 0x1080B0 Listener::ProcessEvent(ev) thiscall
+static int  g_optCuchillo = 1;                  // CuchilloCompartido
+static char g_optArmaCompartida[64] = "w_knife.tik";
+typedef void* (__cdecl* PFN_New)(int size);
+typedef void* (__thiscall* PFN_EvCtor)(void* self, const char* nombre);
+typedef void(__thiscall* PFN_EvSetEdict)(void* ev, DWORD ent);
+typedef void(__thiscall* PFN_EvAddStr)(void* ev, const char* s);
+typedef void(__thiscall* PFN_Process)(void* listener, void* ev);
+static bool DarArma(DWORD entObjetivo, const char* arma) {
+    if (!g_fgameBase) return false;
+    DWORD obj = 0;
+    if (!SafeRead((const DWORD*)(entObjetivo + 0x280), &obj) || !obj) return false;
+    BYTE* b = g_fgameBase;
+    bool ok = true;
+    __try {
+        void* mem = ((PFN_New)(b + 0x1041B0))(0x58);
+        if (!mem) return false;
+        void* ev = ((PFN_EvCtor)(b + 0x1072D0))(mem, "giveweapon");
+        if (!ev) return false;
+        DWORD* fl = (DWORD*)((BYTE*)ev + 0x10);
+        *fl = (*fl & ~8u) | 4u;
+        ((PFN_EvSetEdict)(b + 0x104670))(ev, entObjetivo);
+        ((PFN_EvAddStr)(b + 0x019210))(ev, arma);
+        ((PFN_Process)(b + 0x1080B0))((void*)obj, ev);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    return ok;
+}
+// Nombre del estado actual (mismo recorrido que DumpOne)
+static void NombreEstado(DWORD obj, char* out, int n) {
+    DWORD A = 0, B = 0, S = 0;
+    out[0] = 0;
+    if (!obj) return;
+    SafeRead((const DWORD*)(obj + 0x340), &A);
+    if (A) SafeRead((const DWORD*)(A + 0x1C), &B);
+    if (B) SafeRead((const DWORD*)B, &S);
+    SafeStr(S, out, n);
+}
+static void ArmaCompartidaRevisar(int idx) {
+    if (!g_optCuchillo || !g_fgameBase || idx < 0 || idx > 1) return;
+    int otro = 1 - idx;
+    if (g_armaDada[otro]) return;
+    DWORD ge = 0, objYo = 0, entOtro = 0, objOtro = 0, clienteOtro = 0, usoOtro = 0;
+    if (!SafeRead((const DWORD*)(g_fgameBase + RVA_G_ENTITIES), &ge) || !ge) return;
+    SafeRead((const DWORD*)(ge + (DWORD)idx * 0x2DC + 0x280), &objYo);
+    entOtro = ge + (DWORD)otro * 0x2DC;
+    SafeRead((const DWORD*)(entOtro + 0x280), &objOtro);
+    SafeRead((const DWORD*)(entOtro + 0x200), &clienteOtro);
+    SafeRead((const DWORD*)(entOtro + 0x204), &usoOtro);
+    if (!objYo || !objOtro || !clienteOtro || !(usoOtro & 0xFF)) return;
+    char est[40];
+    NombreEstado(objYo, est, sizeof(est));
+    if (strncmp(est, "ATTACK", 6) != 0) return;
+    g_armaDada[otro] = true;   // una sola vez por sesion
+    bool ok = DarArma(entOtro, g_optArmaCompartida);
+    Log("[ARMA] el jugador %d ataca (estado %s): se da \"%s\" al jugador %d -> %s", idx, est, g_optArmaCompartida, otro, ok ? "ok" : "FALLO");
+}
+
 static void SepararSpawn(DWORD ent);   // definida mas abajo
 
 static void __cdecl Detour_ClientBegin(DWORD ent) {
@@ -668,7 +749,7 @@ static void __cdecl Detour_ClientBegin(DWORD ent) {
     if (idx == 0) g_cambioNivel0 = false;
     if (idx >= 1) {
         CopiarEquipo(ent);
-        ProteccionAplicar(ent);
+        ProteccionAplicar(ent, !g_cambioNivel);
         // En el cambio de mapa el motor llama a ReadPersistant ANTES de que existan los jugadores, asi que no se aplica a nadie.
         // Ahora que los dos existen, se vuelve a leer: el archivo trae un registro por jugador, en el orden 0, 1.
         if (g_optRelectura && g_cambioNivel && g_persTiene && g_origReadPers) {
@@ -679,7 +760,7 @@ static void __cdecl Detour_ClientBegin(DWORD ent) {
         g_cambioNivel = false;
         SepararSpawn(ent);
         g_prevOk[0] = g_prevOk[1] = false;
-        g_escPrevOk = false; g_escLineas = 0; g_escUltimoInuse = 0xFFFFFFFF; g_escLineas2 = 0; memset(g_escMalo, 0, sizeof(g_escMalo)); g_clasifProximo = GetTickCount() + 4000; if (g_optExpEnt) g_expAt = GetTickCount() + (DWORD)g_optExpMs; g_skipAt = 0; if (MapaEnLista()) g_skipAt = GetTickCount() + (DWORD)g_optSkipMs;
+        g_escPrevOk = false; g_escLineas = 0; g_escUltimoInuse = 0xFFFFFFFF; g_escLineas2 = 0; memset(g_escMalo, 0, sizeof(g_escMalo)); g_clasifProximo = GetTickCount() + 4000; if (g_optExpEnt) g_expAt = GetTickCount() + (DWORD)g_optExpMs; g_skipAt = 0; bool enLista = MapaEnLista(); if (enLista) g_skipAt = GetTickCount() + (DWORD)g_optSkipMs; g_sep2At = 0; if (g_optSepararSegundoMs > 0 && !enLista) g_sep2At = GetTickCount() + (DWORD)g_optSepararSegundoMs;
         g_cambiosHasta = GetTickCount() + (DWORD)g_optCambiosMs;
         DWORD now = GetTickCount();
         g_diagHasta = now + (DWORD)g_optDiagDurMs;
@@ -735,7 +816,7 @@ static void SepararSpawn(DWORD ent) {
     DWORD vt = 0, fn = 0;
     if (!SafeRead((const DWORD*)obj1, &vt) || !vt || !SafeRead((const DWORD*)(vt + 0x28), &fn)) return;
     if (fn < (DWORD)g_fgameBase || fn >(DWORD)g_fgameBase + 0x420000) return;
-    float d = (float)g_optSepararDist;
+    float d = (float)(g_sepDistOverride ? g_sepDistOverride : g_optSepararDist);
     Log("[SEPARAR] cliente 1: setOrigin(%.1f, %.1f, %.1f) fn=%08X (jugador 0 en %.1f, %.1f, %.1f)", fa[0] + d, fa[1], fa[2] + 8.0f, fn, fa[0], fa[1], fa[2]);
     ((PFN_SetOrigin)fn)((void*)obj1, fa[0] + d, fa[1], fa[2] + 8.0f);
     DumpPlayers("despues de separar");
@@ -755,10 +836,475 @@ static void __cdecl Detour_ReadPers(DWORD arg) {
     if (g_origReadPers) g_origReadPers(arg);
     DumpPlayers("ReadPersistant despues");
 }
+static void QuitarDiosAmbos() {
+    if (!g_fgameBase) return;
+    DWORD ge = 0;
+    if (!SafeRead((const DWORD*)(g_fgameBase + RVA_G_ENTITIES), &ge) || !ge) return;
+    for (int n = 0; n < 2; n++) {
+        DWORD obj = 0, fl = 0;
+        if (!SafeRead((const DWORD*)(ge + (DWORD)n * 0x2DC + 0x280), &obj) || !obj) continue;
+        if (!SafeRead((const DWORD*)(obj + 0x180), &fl)) continue;
+        if (fl & 8) { *(DWORD*)(obj + 0x180) = fl & ~8u; Log("[PROT] jugador %d: se quita el modo dios antes de guardar los datos (flags %08X -> %08X)", n, fl, fl & ~8u); }
+    }
+}
 static void __cdecl Detour_WritePers(DWORD arg) {
+    QuitarDiosAmbos();   // v0.27: que el archivo de datos nunca guarde el modo dios del mod
     LogPersist("WritePersistant antes", arg);
     if (g_origWritePers) g_origWritePers(arg);
     Log("[PERSIST] WritePersistant terminado");
+}
+
+
+// ====================================================================================================
+// ====== v0.28: SIN FUNDIDO NEGRO MIENTRAS LA OTRA ALICE VIVA + REVIVIR CON LA TECLA DE ACCION ======
+// "Mision fallida" = FUN_1007a860 de fgamex86.dll (RVA 0x7A860): llama a FUN_1007a7c0 (fundido global a negro de 3 s para TODOS los
+// clientes + fadesound) y manda la pantalla "mission.tga" al cliente 0. Se llama desde dos sitios cuando un Player recibe dano letal:
+//   - FUN_10021d50 (ret RVA 0x21FD9): this = EBX        - FUN_10023360 (ret RVA 0x23429): this = ESI
+// Aqui se intercepta: si el que muere es un jugador y queda otro jugador vivo, NO se ejecuta (la muerte sigue su curso, sin fundido).
+// Si mueren todos, se ejecuta la original (inmediatamente si ya se habia anulado una vez).
+static const DWORD RVA_FALLO = 0x0007A860;
+static const DWORD RVA_FALLO_RET1 = 0x00021FD9;
+static const DWORD RVA_FALLO_RET2 = 0x00023429;
+static BYTE* g_falloTramp = nullptr;
+static BYTE* g_blendTramp = nullptr;
+static BYTE* g_fade2Tramp = nullptr;
+static DWORD g_fR[4] = { 0, 0, 0, 0 };   // EBX, ESI, EDI, EBP al entrar en la funcion
+static DWORD g_fRet = 0;
+static bool  g_falloPendiente = false;   // se anulo un fallo: si luego mueren todos hay que ejecutarlo
+static LONG  g_falloLogs = 0;
+static const int MAXJUG = 4;
+
+struct JugInfo { DWORD ed, obj, dying; float vida, vidaMax, pos[3]; };
+static bool LeerJug(int i, JugInfo& j) {
+    memset(&j, 0, sizeof(j));
+    if (!g_fgameBase || i < 0 || i >= MAXJUG) return false;
+    DWORD ge = 0;
+    if (!SafeRead((const DWORD*)(g_fgameBase + RVA_G_ENTITIES), &ge) || !ge) return false;
+    DWORD ed = ge + (DWORD)i * 0x2DC, cl = 0, inu = 0, obj = 0;
+    if (!SafeRead((const DWORD*)(ed + 0x200), &cl) || !SafeRead((const DWORD*)(ed + 0x204), &inu) || !SafeRead((const DWORD*)(ed + 0x280), &obj)) return false;
+    if (!cl || !(inu & 0xFF) || !obj) return false;
+    DWORD d = 0, v = 0, vm = 0, p[3] = { 0, 0, 0 };
+    if (!SafeRead((const DWORD*)(obj + 0x17C), &d)) return false;
+    SafeRead((const DWORD*)(obj + 0x170), &v);
+    SafeRead((const DWORD*)(obj + 0x178), &vm);
+    for (int k = 0; k < 3; k++) SafeRead((const DWORD*)(obj + 0x90 + 4 * k), &p[k]);
+    j.ed = ed; j.obj = obj; j.dying = d;
+    memcpy(&j.vida, &v, 4); memcpy(&j.vidaMax, &vm, 4); memcpy(j.pos, p, 12);
+    return true;
+}
+
+static int __cdecl DecidirFallo();
+static __declspec(naked) void Detour_Fallo() {
+    __asm {
+        mov  eax, dword ptr[esp]
+        mov  dword ptr[g_fRet], eax
+        mov  dword ptr[g_fR], ebx
+        mov  dword ptr[g_fR + 4], esi
+        mov  dword ptr[g_fR + 8], edi
+        mov  dword ptr[g_fR + 12], ebp
+        call DecidirFallo
+        test eax, eax
+        jz   saltar
+        jmp  dword ptr[g_falloTramp]
+        saltar:
+        ret
+    }
+}
+
+static int __cdecl DecidirFallo() {
+    if (!g_optSinFallo || !g_fgameBase || !g_falloTramp) return 1;
+    JugInfo j[MAXJUG]; bool ok[MAXJUG];
+    int total = 0, vivos = 0;
+    for (int i = 0; i < MAXJUG; i++) {
+        ok[i] = LeerJug(i, j[i]);
+        if (ok[i]) { total++; if (j[i].dying == 0) vivos++; }
+    }
+    DWORD ret = g_fRet - (DWORD)g_fgameBase;
+    DWORD reg = (ret == RVA_FALLO_RET1) ? g_fR[0] : ((ret == RVA_FALLO_RET2) ? g_fR[1] : 0);
+    int victima = -1;
+    for (int i = 0; i < MAXJUG; i++) if (ok[i] && reg && j[i].obj == reg) victima = i;
+    bool suprimir = (total >= 2 && victima >= 0 && j[victima].dying == 0 && vivos >= 2);
+    LONG n = InterlockedIncrement(&g_falloLogs);
+    if (n <= 60)
+        Log("[FALLO] 'mision fallida' pedida (ret RVA %08X, EBX=%08X ESI=%08X EDI=%08X): jugadores=%d vivos=%d victima=%d -> %s",
+            ret, g_fR[0], g_fR[1], g_fR[2], total, vivos, victima, suprimir ? "ANULADA (queda otra Alice viva)" : "se ejecuta");
+    if (suprimir) { g_falloPendiente = true; return 0; }
+    g_falloPendiente = false;
+    return 1;
+}
+
+static void ApplyFalloHook(BYTE* base) {
+    if (!g_optSinFallo) return;
+    BYTE* t = base + RVA_FALLO;
+    BYTE cur[12];
+    __try { memcpy(cur, t, 12); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (cur[0] == 0xE9) return;   // ya parcheado
+    if (!(cur[0] == 0x6A && cur[1] == 0x01 && cur[2] == 0x68 && cur[7] == 0x68)) {
+        static DWORD avisado = 0;
+        if (avisado != (DWORD)base) { Log("[FALLO] bytes inesperados en %p; no se instala el gancho", t); avisado = (DWORD)base; }
+        return;
+    }
+    BYTE* tr = (BYTE*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tr) return;
+    memcpy(tr, cur, 7);                 // push 1 ; push imm32  (instrucciones completas, ya reubicadas por el cargador)
+    tr[7] = 0xE9;
+    *(DWORD*)(tr + 8) = (DWORD)(t + 7) - (DWORD)(tr + 12);
+    g_falloTramp = tr;
+    BYTE salto[7] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90 };
+    *(DWORD*)(salto + 1) = (DWORD)&Detour_Fallo - (DWORD)(t + 5);
+    DWORD old = 0;
+    if (VirtualProtect(t, 7, PAGE_EXECUTE_READWRITE, &old)) {
+        memcpy(t, salto, 7);
+        VirtualProtect(t, 7, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), t, 7);
+        Log("[FALLO] gancho instalado en %p (trampolin %p)", t, tr);
+    }
+}
+
+// Envia un evento de consola a un jugador (misma secuencia que DarArma; arg puede ser nullptr)
+static bool EnviarEvento(DWORD entObjetivo, const char* nombre, const char* arg) {
+    if (!g_fgameBase) return false;
+    DWORD obj = 0;
+    if (!SafeRead((const DWORD*)(entObjetivo + 0x280), &obj) || !obj) return false;
+    BYTE* b = g_fgameBase;
+    bool ok = true;
+    __try {
+        void* mem = ((PFN_New)(b + 0x1041B0))(0x58);
+        if (!mem) return false;
+        void* ev = ((PFN_EvCtor)(b + 0x1072D0))(mem, nombre);
+        if (!ev) return false;
+        DWORD* fl = (DWORD*)((BYTE*)ev + 0x10);
+        *fl = (*fl & ~8u) | 4u;
+        ((PFN_EvSetEdict)(b + 0x104670))(ev, entObjetivo);
+        if (arg) ((PFN_EvAddStr)(b + 0x019210))(ev, arg);
+        ((PFN_Process)(b + 0x1080B0))((void*)obj, ev);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    return ok;
+}
+
+// Instantanea de los campos que la muerte modifica (se toma mientras el jugador esta vivo)
+struct Snap { bool ok; DWORD e210, e230, e2d0, f180, fE4, fE8; };
+static Snap  g_snap[MAXJUG];
+static DWORD g_holdIni[MAXJUG] = { 0, 0, 0, 0 };
+static DWORD g_godHasta[MAXJUG] = { 0, 0, 0, 0 };
+static DWORD g_revLogAt[MAXJUG] = { 0, 0, 0, 0 };
+static DWORD g_btnPrev[MAXJUG] = { 0, 0, 0, 0 };
+static DWORD g_dyingPrev[MAXJUG] = { 0, 0, 0, 0 };
+static int   g_btnLogs = 0;
+static DWORD g_usoT[MAXJUG] = { 0, 0, 0, 0 };
+
+static void ResetV28() {
+    g_falloPendiente = false; g_falloTramp = nullptr; g_blendTramp = nullptr; g_fade2Tramp = nullptr;
+    memset(g_snap, 0, sizeof(g_snap));
+    for (int i = 0; i < MAXJUG; i++) { g_holdIni[i] = 0; g_godHasta[i] = 0; g_revLogAt[i] = 0; g_dyingPrev[i] = 0; g_btnPrev[i] = 0; }
+    g_sep2At = 0;
+}
+
+static void TomarSnap(int i, const JugInfo& j) {
+    DWORD edp = 0;
+    if (!SafeRead((const DWORD*)(j.obj + 0x10), &edp) || !edp) edp = j.ed;
+    Snap s; memset(&s, 0, sizeof(s));
+    bool ok = SafeRead((const DWORD*)(edp + 0x210), &s.e210) & SafeRead((const DWORD*)(edp + 0x230), &s.e230) &
+        SafeRead((const DWORD*)(edp + 0x2D0), &s.e2d0) & SafeRead((const DWORD*)(j.obj + 0x180), &s.f180) &
+        SafeRead((const DWORD*)(j.obj + 0xE4), &s.fE4) & SafeRead((const DWORD*)(j.obj + 0xE8), &s.fE8);
+    s.ok = ok;
+    if (ok) g_snap[i] = s;
+}
+
+static void Revivir(int tgt, int rev) {
+    JugInfo t, r;
+    if (!LeerJug(tgt, t) || !LeerJug(rev, r)) return;
+    float dar = r.vida * (float)g_optRevivePct / 100.0f;
+    float nuevoT = dar < (float)g_optReviveMin ? (float)g_optReviveMin : dar;
+    float tope = t.vidaMax > 1.0f ? t.vidaMax : 100.0f;
+    if (nuevoT > tope) nuevoT = tope;
+    float nuevoR = r.vida - dar;
+    if (nuevoR < 1.0f) nuevoR = 1.0f;
+    char est0[40]; NombreEstado(t.obj, est0, sizeof(est0));
+    Snap s = g_snap[tgt];
+    Log("[REVIVIR] jugador %d revive al jugador %d: vida revivida %.1f -> %.1f ; vida de quien revive %.1f -> %.1f ; estado antes=\"%s\" dying=%u instantanea=%s",
+        rev, tgt, t.vida, nuevoT, r.vida, nuevoR, est0, (unsigned)t.dying, s.ok ? "si" : "NO");
+    DWORD edp = 0;
+    if (!SafeRead((const DWORD*)(t.obj + 0x10), &edp) || !edp) edp = t.ed;
+    __try {
+        *(float*)(t.obj + 0x170) = nuevoT;
+        *(float*)(r.obj + 0x170) = nuevoR;
+        DWORD fl = *(DWORD*)(t.obj + 0x180);
+        *(DWORD*)(t.obj + 0x180) = s.ok ? (s.f180 & ~8u) : (fl | 3u);
+        if (s.ok) {
+            *(DWORD*)(edp + 0x210) = s.e210;
+            *(DWORD*)(edp + 0x2D0) = s.e2d0;
+            if (*(DWORD*)(edp + 0x27C) != 0) *(DWORD*)(edp + 0x230) = s.e230;
+            *(DWORD*)(t.obj + 0xE4) = s.fE4;
+            *(DWORD*)(t.obj + 0xE8) = s.fE8;
+        }
+        *(DWORD*)(t.obj + 0x17C) = 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { Log("[REVIVIR] excepcion al restaurar campos"); }
+    bool ev = EnviarEvento(t.ed, "resetstate", nullptr);
+    Log("[REVIVIR] evento resetstate -> %s", ev ? "ok" : "FALLO");
+    DWORD now = GetTickCount();
+    if (g_optReviveInvulMs > 0) {
+        __try { *(DWORD*)(t.obj + 0x180) |= 8; }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+        g_godHasta[tgt] = now + (DWORD)g_optReviveInvulMs;
+    }
+    g_revLogAt[tgt] = now + 800;
+    g_falloPendiente = false;
+}
+
+static void FalloPendienteRevisar() {
+    if (!g_falloPendiente || !g_falloTramp) return;
+    int total = 0, vivos = 0;
+    for (int i = 0; i < MAXJUG; i++) { JugInfo j; if (LeerJug(i, j)) { total++; if (j.dying == 0) vivos++; } }
+    if (total >= 1 && vivos == 0) {
+        g_falloPendiente = false;
+        Log("[FALLO] han muerto todas las Alices: se ejecuta la 'mision fallida' original");
+        ((void(__cdecl*)())g_falloTramp)();
+    }
+}
+
+static void V28Think(int idx, DWORD ent) {
+    if (idx < 0 || idx >= MAXJUG) return;
+    DWORD now = GetTickCount();
+    JugInfo me;
+    if (!LeerJug(idx, me)) return;
+    // cambios de muerte/vida
+    if (me.dying != g_dyingPrev[idx]) {
+        char est[40]; NombreEstado(me.obj, est, sizeof(est));
+        Log("[MUERTE] jugador %d: dying %u -> %u vida=%.1f estado=\"%s\"", idx, (unsigned)g_dyingPrev[idx], (unsigned)me.dying, me.vida, est);
+        g_dyingPrev[idx] = me.dying;
+    }
+    if (me.dying == 0 && me.vida > 0.0f) TomarSnap(idx, me);
+    // fin del modo dios corto tras revivir
+    if (g_godHasta[idx] && (int)(now - g_godHasta[idx]) >= 0) {
+        g_godHasta[idx] = 0;
+        __try { *(DWORD*)(me.obj + 0x180) &= ~8u; }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+        Log("[REVIVIR] jugador %d: fin del modo dios tras revivir", idx);
+    }
+    if (g_revLogAt[idx] && (int)(now - g_revLogAt[idx]) >= 0) {
+        g_revLogAt[idx] = 0;
+        DumpPlayers("revivir despues");
+    }
+    // boton
+    DWORD btn = 0, modo = 0;
+    SafeRead((const DWORD*)(me.obj + 0x5C8), &btn);
+    SafeRead((const DWORD*)(me.obj + 0x4D0), &modo);
+    int bit = modo ? 9 : 13;
+    bool uso = ((btn >> bit) & 1) != 0;
+    if (g_optReviveDiag && ((btn >> 8) & 0xFF) != ((g_btnPrev[idx] >> 8) & 0xFF)) {
+        if (g_btnLogs++ < 250) Log("[BOTONES] jugador %d: +5C8=%08X (+4D0=%08X) -> bit de 'usar' (%d) = %d", idx, (unsigned)btn, (unsigned)modo, bit, uso ? 1 : 0);
+    }
+    g_btnPrev[idx] = btn;
+    if (uso) g_usoT[idx] = now ? now : 1;
+    bool usoHold = g_usoT[idx] && (int)(now - g_usoT[idx]) < 450;   // el bit parpadea: se tolera un hueco de 450 ms
+    // revivir
+    if (g_optRevivir) {
+        if (me.dying != 0 || me.vida <= 0.0f) { g_holdIni[idx] = 0; }
+        else {
+            int tgt = -1;
+            float lim2 = (float)g_optReviveDist * (float)g_optReviveDist;
+            for (int k = 0; k < MAXJUG; k++) {
+                if (k == idx) continue;
+                JugInfo o;
+                if (!LeerJug(k, o) || o.dying == 0) continue;
+                float dx = o.pos[0] - me.pos[0], dy = o.pos[1] - me.pos[1], dz = o.pos[2] - me.pos[2];
+                if (dx * dx + dy * dy + dz * dz <= lim2) { tgt = k; break; }
+            }
+            if (tgt < 0 || !usoHold) {
+                if (g_holdIni[idx] && tgt >= 0) Log("[REVIVIR] jugador %d suelta la tecla antes de tiempo", idx);
+                g_holdIni[idx] = 0;
+            }
+            else if (!g_holdIni[idx]) {
+                g_holdIni[idx] = now ? now : 1;
+                Log("[REVIVIR] jugador %d empieza a revivir al jugador %d (hay que mantener %d ms)", idx, tgt, g_optReviveMs);
+            }
+            else if ((int)(now - g_holdIni[idx]) >= g_optReviveMs) {
+                g_holdIni[idx] = 0;
+                Revivir(tgt, idx);
+            }
+        }
+    }
+    FalloPendienteRevisar();
+    // segunda colocacion del cliente 1 (solape visto solo en B al unirse tarde)
+    if (idx >= 1 && g_sep2At && (int)(now - g_sep2At) >= 0) {
+        g_sep2At = 0;
+        JugInfo a;
+        if (LeerJug(0, a) && a.dying == 0 && me.dying == 0) {
+            Log("[SEPARAR] segunda colocacion del cliente %d", idx);
+            g_sepDistOverride = g_optSepararDist + 40;
+            SepararSpawn(ent);
+            g_sepDistOverride = 0;
+        }
+    }
+}
+
+// ====== v0.29: tinte/fundido de pantalla por jugador. FUN_100a92b0 (RVA 0xA92B0, __fastcall this=Player) calcula cada frame el color de
+// mezcla de la pantalla (agua, dano, fundido global de camfade/mision) y lo escribe en client+0x3C8..0x3D4 (RGBA, floats).
+// Se engancha: despues de la original, si hay un jugador muerto y otro vivo, el alfa (client+0x3D4) se pone a 0.
+static const DWORD RVA_BLEND = 0x000A92B0;
+static LONG  g_blendLogs = 0;
+static void __cdecl PostBlend(DWORD player) {
+    if (!g_fgameBase) return;
+    int total = 0, vivos = 0, muertos = 0; bool esJug = false;
+    for (int i = 0; i < MAXJUG; i++) {
+        JugInfo j;
+        if (!LeerJug(i, j)) continue;
+        total++; if (j.dying == 0) vivos++; else muertos++;
+        if (j.obj == player) esJug = true;
+    }
+    if (!esJug) return;
+    DWORD cli = 0, a = 0, r = 0, g = 0, b = 0;
+    if (!SafeRead((const DWORD*)(player + 0x14), &cli) || !cli) return;
+    if (!SafeRead((const DWORD*)(cli + 0x3D4), &a)) return;
+    float fa; memcpy(&fa, &a, 4);
+    if (!(fa > 0.02f)) return;
+    SafeRead((const DWORD*)(cli + 0x3C8), &r); SafeRead((const DWORD*)(cli + 0x3CC), &g); SafeRead((const DWORD*)(cli + 0x3D0), &b);
+    bool anular = g_optSinFundido && total >= 2 && muertos >= 1 && vivos >= 1;
+    LONG n = InterlockedIncrement(&g_blendLogs);
+    if (n <= 80 || (n % 200) == 0)
+        Log("[BLEND] jugador obj=%08X alfa=%.3f rgb=%08X %08X %08X (jugadores=%d vivos=%d muertos=%d) -> %s",
+            player, fa, (unsigned)r, (unsigned)g, (unsigned)b, total, vivos, muertos, anular ? "alfa a 0" : "se deja");
+    if (anular) { float z = 0.0f; memcpy((void*)(cli + 0x3D4), &z, 4); }
+}
+static __declspec(naked) void Detour_Blend() {
+    __asm {
+        push ecx
+        call dword ptr[g_blendTramp]
+        pop  ecx
+        push ecx
+        call PostBlend
+        add  esp, 4
+        ret
+    }
+}
+static void ApplyBlendHook(BYTE* base) {
+    BYTE* t = base + RVA_BLEND;
+    BYTE cur[8];
+    __try { memcpy(cur, t, 8); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (cur[0] == 0xE9) return;
+    if (!(cur[0] == 0x83 && cur[1] == 0xEC && cur[2] == 0x1C && cur[3] == 0xD9 && cur[4] == 0xEE)) {
+        static DWORD avisado = 0;
+        if (avisado != (DWORD)base) { Log("[BLEND] bytes inesperados en %p; no se instala el gancho", t); avisado = (DWORD)base; }
+        return;
+    }
+    BYTE* tr = (BYTE*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tr) return;
+    memcpy(tr, cur, 5);
+    tr[5] = 0xE9;
+    *(DWORD*)(tr + 6) = (DWORD)(t + 5) - (DWORD)(tr + 10);
+    g_blendTramp = tr;
+    BYTE salto[5] = { 0xE9, 0, 0, 0, 0 };
+    *(DWORD*)(salto + 1) = (DWORD)&Detour_Blend - (DWORD)(t + 5);
+    DWORD old = 0;
+    if (VirtualProtect(t, 5, PAGE_EXECUTE_READWRITE, &old)) {
+        memcpy(t, salto, 5);
+        VirtualProtect(t, 5, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), t, 5);
+        Log("[BLEND] gancho instalado en %p (trampolin %p)", t, tr);
+    }
+}
+// Variables globales de fundido/mision de fgamex86 (RVA = direccion Ghidra - 0x10000000); se registran cuando cambian
+static void FadeGlobalesRevisar() {
+    static const DWORD rv[] = { 0x1CD584, 0x1CD58C, 0x1CD590, 0x1CD528, 0x1CD5C4, 0x1CD5C8, 0x1CD5CC, 0x1CD5D0, 0x1CD5D4, 0x1CD5D8, 0x1CD5DC, 0x1CD5E0 };
+    static const char* nm[] = { "cinematica", "fallo_flag", "fallo_guarda", "intermision", "fade_r", "fade_g", "fade_b", "fade_alfa", "fade_tiempo", "fade_duracion", "fade_sale", "fade_aditivo" };
+    static DWORD prev[12]; static bool init = false; static int lineas = 0;
+    if (!g_fgameBase) return;
+    for (int k = 0; k < 12; k++) {
+        DWORD v = 0;
+        if (!SafeRead((const DWORD*)(g_fgameBase + rv[k]), &v)) continue;
+        if (!init) { prev[k] = v; continue; }
+        if (v == prev[k]) continue;
+        if (k == 8) {   // el tiempo baja solo cada frame: solo interesa cuando SUBE (nuevo fundido)
+            float fv, fp; memcpy(&fv, &v, 4); memcpy(&fp, &prev[k], 4);
+            prev[k] = v;
+            if (!(fv > fp + 0.01f)) continue;
+        }
+        else prev[k] = v;
+        if (lineas++ < 300) { float f; memcpy(&f, &v, 4); Log("[FADE] %s (RVA %X) = %08X (%.3f)", nm[k], rv[k], (unsigned)v, f); }
+    }
+    init = true;
+}
+
+// ====== v0.30: FUN_1007a7c0 (RVA 0x7A7C0) = "fundido de fallo": pone el guardia DAT_101cd590, manda el evento DAT_102dfb60 a cada jugador
+// (de ahi sale el menu de cargar partida), fundido global a negro y fadesound. Lo llama:
+//   - el Player cuando dying==2 y pasa el tiempo de muerte (ret RVA 0xBC69A, this = EBP)  <-- el caso real de la muerte
+//   - FUN_1007a860 (ret RVA 0x7A882)
+// Si el que muere es un jugador y queda otro vivo, se anula (el cuerpo queda en el suelo hasta que lo revivan).
+// Si no queda nadie vivo, se deja pasar (y como el Player lo vuelve a pedir cada frame, no hace falta vigilante).
+static const DWORD RVA_FADE2 = 0x0007A7C0;
+static const DWORD RVA_FADE2_RET_THINK = 0x000BC69A;
+static const DWORD RVA_FADE2_RET_FALLO = 0x0007A882;
+static DWORD g_f2R[4] = { 0, 0, 0, 0 };
+static DWORD g_f2Ret = 0;
+static LONG  g_fade2Logs = 0;
+static LONG  g_fade2Anuladas = 0;
+static int __cdecl DecidirFade2() {
+    if (!g_optSinFallo || !g_fgameBase || !g_fade2Tramp) return 1;
+    DWORD ret = g_f2Ret - (DWORD)g_fgameBase;
+    if (ret != RVA_FADE2_RET_THINK) return 1;      // la llamada de FUN_1007a860 ya la decide DecidirFallo
+    JugInfo j[MAXJUG]; bool ok[MAXJUG];
+    int total = 0, vivos = 0;
+    for (int i = 0; i < MAXJUG; i++) { ok[i] = LeerJug(i, j[i]); if (ok[i]) { total++; if (j[i].dying == 0) vivos++; } }
+    int victima = -1;
+    for (int i = 0; i < MAXJUG; i++) if (ok[i] && j[i].obj == g_f2R[3]) victima = i;
+    bool suprimir = (total >= 2 && victima >= 0 && vivos >= 1 && j[victima].dying != 0);
+    LONG n = InterlockedIncrement(&g_fade2Logs);
+    if (suprimir) {
+        LONG a = InterlockedIncrement(&g_fade2Anuladas);
+        if (a <= 5 || (a % 300) == 0) Log("[FALLO2] fundido/menu de muerte ANULADO (jugador %d muerto, vivos=%d, total=%d, anuladas=%ld)", victima, vivos, total, a);
+        return 0;
+    }
+    if (n <= 40) Log("[FALLO2] fundido/menu de muerte se EJECUTA (victima=%d vivos=%d total=%d EBP=%08X)", victima, vivos, total, g_f2R[3]);
+    return 1;
+}
+static __declspec(naked) void Detour_Fade2() {
+    __asm {
+        mov  eax, dword ptr[esp]
+        mov  dword ptr[g_f2Ret], eax
+        mov  dword ptr[g_f2R], ebx
+        mov  dword ptr[g_f2R + 4], esi
+        mov  dword ptr[g_f2R + 8], edi
+        mov  dword ptr[g_f2R + 12], ebp
+        call DecidirFade2
+        test eax, eax
+        jz   saltar
+        jmp  dword ptr[g_fade2Tramp]
+        saltar:
+        ret
+    }
+}
+static void ApplyFade2Hook(BYTE* base) {
+    if (!g_optSinFallo) return;
+    BYTE* t = base + RVA_FADE2;
+    BYTE cur[12];
+    __try { memcpy(cur, t, 12); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (cur[0] == 0xE9) return;
+    if (!(cur[0] == 0x83 && cur[1] == 0x3D && cur[6] == 0x00)) {     // cmp dword ptr [DAT_101cd590], 0  (7 bytes)
+        static DWORD avisado = 0;
+        if (avisado != (DWORD)base) { Log("[FALLO2] bytes inesperados en %p; no se instala el gancho", t); avisado = (DWORD)base; }
+        return;
+    }
+    BYTE* tr = (BYTE*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tr) return;
+    memcpy(tr, cur, 7);
+    tr[7] = 0xE9;
+    *(DWORD*)(tr + 8) = (DWORD)(t + 7) - (DWORD)(tr + 12);
+    g_fade2Tramp = tr;
+    BYTE salto[7] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90 };
+    *(DWORD*)(salto + 1) = (DWORD)&Detour_Fade2 - (DWORD)(t + 5);
+    DWORD old = 0;
+    if (VirtualProtect(t, 7, PAGE_EXECUTE_READWRITE, &old)) {
+        memcpy(t, salto, 7);
+        VirtualProtect(t, 7, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), t, 7);
+        Log("[FALLO2] gancho instalado en %p (trampolin %p)", t, tr);
+    }
 }
 
 static void __cdecl Detour_ClientThink(DWORD ent, DWORD cmd) {
@@ -771,6 +1317,9 @@ static void __cdecl Detour_ClientThink(DWORD ent, DWORD cmd) {
     if (g_origClientThink) g_origClientThink(ent, cmd);
     if (idx >= 1) { Seguir(ent); ExperimentoRevisar(); }
     CentinelaRevisar();
+    ArmaCompartidaRevisar(idx);
+    V28Think(idx, ent);
+    if (idx == 0) FadeGlobalesRevisar();
     if (idx >= 1 && g_tpAt && (int)(GetTickCount() - g_tpAt) >= 0) { g_tpAt = 0; Log("[CENTINELA] llevando al cliente 1 junto al jugador 0 tras saltar la cinematica"); SepararSpawn(ent); }
 }
 
@@ -1239,6 +1788,8 @@ static DWORD WINAPI InitThread(LPVOID) {
     HMODULE exe = GetModuleHandleA(nullptr);
     Log("alice.exe base = %p", (void*)exe);
     ParchearLoadgame((BYTE*)exe);
+    Log("Opciones v0.28: EvitarFalloSiOtroVivo=%d ReviveActivo=%d ReviveDistancia=%d ReviveMantenerMs=%d ReviveCompartirPct=%d ReviveVidaMin=%d ReviveInvulnerableMs=%d ReviveDiagnostico=%d SepararSegundoMs=%d",
+        g_optSinFallo, g_optRevivir, g_optReviveDist, g_optReviveMs, g_optRevivePct, g_optReviveMin, g_optReviveInvulMs, g_optReviveDiag, g_optSepararSegundoMs);
     Log("Opciones: PARCHE_RUNENTITY=%s PARCHE_ESTADO=%s",
         PARCHE_RUNENTITY ? "si" : "no", PARCHE_ESTADO ? "si" : "no");
     Log("Opciones (alice-coop.ini): SaltarResetClientes=%d ArreglarArbolCliente=%d HardwareWatch=%d HookClientThink=%d HookClientDisconnect=%d DiagIntervaloMs=%d DiagDuracionMs=%d ProtegerClienteMs=%d CopiarEquipoCliente1=%d ProtegerJugador0Ms=%d HookPersistencia=%d RelecturaPersistente=%d SepararSpawn=%d SepararDistancia=%d SeguirJugador0=%d SeguirDistancia=%d SeguirEsperaMs=%d CambiosDuracionMs=%d",
@@ -1259,7 +1810,7 @@ static DWORD WINAPI InitThread(LPVOID) {
                     loadTick = GetTickCount(); diagDone = false;
                     memset(g_thinkCount, 0, sizeof(g_thinkCount));
                 }
-                if (i == 1 && !m) { g_diagHasta = 0; g_protHasta = 0; g_prot0Hasta = 0; }   // los objetos ya no existen
+                if (i == 1 && !m) { g_diagHasta = 0; g_protHasta = 0; g_prot0Hasta = 0; ResetV28(); }   // los objetos ya no existen
             }
         }
         g_fgameBase = (BYTE*)last[1];
@@ -1267,6 +1818,9 @@ static DWORD WINAPI InitThread(LPVOID) {
         if (last[1]) g_arbolLogueado = false;
         if (last[1]) {
             ApplyCodePatch((BYTE*)last[1]);
+            ApplyFalloHook((BYTE*)last[1]);
+            ApplyBlendHook((BYTE*)last[1]);
+            ApplyFade2Hook((BYTE*)last[1]);
             ApplyStatePatch((BYTE*)last[1]);
             ApplyStatemapPatch((BYTE*)last[1]);
             ApplyPatches((BYTE*)last[1]);
@@ -1303,7 +1857,7 @@ static void LoadOptions(const char* dir) {
         WritePrivateProfileStringA("alice-coop", "HookClientDisconnect", "1", g_iniPath);
         WritePrivateProfileStringA("alice-coop", "DiagIntervaloMs", "1000", g_iniPath);
         WritePrivateProfileStringA("alice-coop", "DiagDuracionMs", "7200000", g_iniPath);
-        WritePrivateProfileStringA("alice-coop", "ProtegerClienteMs", "30000", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "ProtegerClienteMs", "10000", g_iniPath);
         WritePrivateProfileStringA("alice-coop", "CopiarEquipoCliente1", "0", g_iniPath);
         WritePrivateProfileStringA("alice-coop", "ProtegerJugador0Ms", "5000", g_iniPath);
         WritePrivateProfileStringA("alice-coop", "HookPersistencia", "1", g_iniPath);
@@ -1320,6 +1874,19 @@ static void LoadOptions(const char* dir) {
         WritePrivateProfileStringA("alice-coop", "SaltarCinematicaMapas", g_optSkipMapas, g_iniPath);
         WritePrivateProfileStringA("alice-coop", "SaltarCinematicaMs", "35000", g_iniPath);
         WritePrivateProfileStringA("alice-coop", "PermitirCargarConDosJugadores", "1", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "CuchilloCompartido", "1", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "ProtegerClientePrimeraMs", "60000", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "ArmaCompartida", "w_knife.tik", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "EvitarFalloSiOtroVivo", "1", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "QuitarFundidoSiOtroVivo", "1", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "ReviveActivo", "1", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "ReviveDistancia", "110", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "ReviveMantenerMs", "1500", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "ReviveCompartirPct", "50", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "ReviveVidaMin", "15", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "ReviveInvulnerableMs", "3000", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "ReviveDiagnostico", "1", g_iniPath);
+        WritePrivateProfileStringA("alice-coop", "SepararSegundoMs", "0", g_iniPath);
     }
     g_optSaltarReset = (int)GetPrivateProfileIntA("alice-coop", "SaltarResetClientes", 1, g_iniPath);
     g_optArbolCliente = (int)GetPrivateProfileIntA("alice-coop", "ArreglarArbolCliente", 1, g_iniPath);
@@ -1328,7 +1895,8 @@ static void LoadOptions(const char* dir) {
     g_optHookDisc = (int)GetPrivateProfileIntA("alice-coop", "HookClientDisconnect", 1, g_iniPath);
     g_optDiagMs = (int)GetPrivateProfileIntA("alice-coop", "DiagIntervaloMs", 1000, g_iniPath);
     g_optDiagDurMs = (int)GetPrivateProfileIntA("alice-coop", "DiagDuracionMs", 7200000, g_iniPath);
-    g_optProtegerMs = (int)GetPrivateProfileIntA("alice-coop", "ProtegerClienteMs", 30000, g_iniPath);
+    g_optProtegerMs = (int)GetPrivateProfileIntA("alice-coop", "ProtegerClienteMs", 10000, g_iniPath);
+    g_optProtegerPrimeraMs = (int)GetPrivateProfileIntA("alice-coop", "ProtegerClientePrimeraMs", 60000, g_iniPath);
     g_optEquipo = (int)GetPrivateProfileIntA("alice-coop", "CopiarEquipoCliente1", 0, g_iniPath);
     g_optProt0Ms = (int)GetPrivateProfileIntA("alice-coop", "ProtegerJugador0Ms", 5000, g_iniPath);
     g_optPersist = (int)GetPrivateProfileIntA("alice-coop", "HookPersistencia", 1, g_iniPath);
@@ -1345,6 +1913,18 @@ static void LoadOptions(const char* dir) {
     { char tmp[256]; GetPrivateProfileStringA("alice-coop", "SaltarCinematicaMapas", "fortress1$fortress1_start1", tmp, sizeof(tmp), g_iniPath); strcpy_s(g_optSkipMapas, tmp); }
     g_optSkipMs = (int)GetPrivateProfileIntA("alice-coop", "SaltarCinematicaMs", 35000, g_iniPath);
     g_optPermitirCargar = (int)GetPrivateProfileIntA("alice-coop", "PermitirCargarConDosJugadores", 1, g_iniPath);
+    g_optCuchillo = (int)GetPrivateProfileIntA("alice-coop", "CuchilloCompartido", 1, g_iniPath);
+    { char tmp[64]; GetPrivateProfileStringA("alice-coop", "ArmaCompartida", "w_knife.tik", tmp, sizeof(tmp), g_iniPath); strcpy_s(g_optArmaCompartida, tmp); }
+    g_optSinFallo = (int)GetPrivateProfileIntA("alice-coop", "EvitarFalloSiOtroVivo", 1, g_iniPath);
+    g_optSinFundido = (int)GetPrivateProfileIntA("alice-coop", "QuitarFundidoSiOtroVivo", 1, g_iniPath);
+    g_optRevivir = (int)GetPrivateProfileIntA("alice-coop", "ReviveActivo", 1, g_iniPath);
+    g_optReviveDist = (int)GetPrivateProfileIntA("alice-coop", "ReviveDistancia", 110, g_iniPath);
+    g_optReviveMs = (int)GetPrivateProfileIntA("alice-coop", "ReviveMantenerMs", 1500, g_iniPath);
+    g_optRevivePct = (int)GetPrivateProfileIntA("alice-coop", "ReviveCompartirPct", 50, g_iniPath);
+    g_optReviveMin = (int)GetPrivateProfileIntA("alice-coop", "ReviveVidaMin", 15, g_iniPath);
+    g_optReviveInvulMs = (int)GetPrivateProfileIntA("alice-coop", "ReviveInvulnerableMs", 3000, g_iniPath);
+    g_optReviveDiag = (int)GetPrivateProfileIntA("alice-coop", "ReviveDiagnostico", 1, g_iniPath);
+    g_optSepararSegundoMs = (int)GetPrivateProfileIntA("alice-coop", "SepararSegundoMs", 0, g_iniPath);
     if (g_optDiagMs < 100) g_optDiagMs = 100;
 }
 
@@ -1361,7 +1941,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
         sprintf_s(logPath, "%salice-coop_%lu.log", dir, GetCurrentProcessId());
         fopen_s(&g_log, logPath, "w");
         LoadOptions(dir);
-        Log("=== alice-coop proxy v0.25 (v0.24 + permitir loadgame con sv_maxclients 2) iniciado (PID %lu) ===", GetCurrentProcessId());
+        Log("=== alice-coop proxy v0.30 (v0.29 + anula el fundido/menu de muerte en FUN_1007a7c0 mientras la otra Alice viva + tecla de revivir tolerante a parpadeos) iniciado (PID %lu) ===", GetCurrentProcessId());
 
         AddVectoredExceptionHandler(1, CrashLogger);
 
