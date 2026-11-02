@@ -7,3 +7,5 @@ Este mod es una Alpha. No se han hecho pruebas de inicio a fin de todo el juego.
 En el juego existe una mecánica para revivir a cualquiera de ambas Alice con el botón de acción, "Enter" o "B" dejando presionado por alrededor de 5s
 
 Solo el host puede cargar y guardar partidas.
+
+Si tiene instalado el MOD HD con VorpalFix.ini desactive esta variable: "DisableWinsockInitialization = 0" ES OBLIGATORIO para hacer funcionar el multijugador de Quake III
