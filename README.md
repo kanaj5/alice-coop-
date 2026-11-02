@@ -11,7 +11,7 @@ Solo el host puede cargar y guardar partidas.
 Si tiene instalado el MOD HD con VorpalFix.ini desactive esta variable: "DisableWinsockInitialization = 0" ES OBLIGATORIO para hacer funcionar el multijugador de Quake III
 
 -El archivo Alice-Coop.bat es un Launcher para la función del mod
--Escohjes ser Host o cliente
+-Escojes ser Host o cliente
 -Muestra tu IP para compartirla si eres HOST.
 -Entras como cliente y pide solo la IP del host.
 -OBLIGATORIO ENTRAR POR ESTE .bat para poder jugar el mod
